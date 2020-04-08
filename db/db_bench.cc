@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <string.h>
 
 #include "leveldb/cache.h"
 #include "leveldb/db.h"
@@ -59,7 +60,7 @@ static const char* FLAGS_benchmarks =
     "snappyuncomp,";
 
 // Number of key/values to place in database
-static int FLAGS_num = 1000000;
+static int FLAGS_num = 1000;
 
 // Number of read operations to do.  If negative, do FLAGS_num reads.
 static int FLAGS_reads = -1;
@@ -68,8 +69,9 @@ static int FLAGS_reads = -1;
 static int FLAGS_threads = 1;
 
 // Size of each value
-static int FLAGS_value_size = 100;
+static int FLAGS_value_size = 256;
 
+static int FLAGS_stat_size = 1024 * 1024 * 16;//16M
 // Arrange to generate values that shrink to this fraction of
 // their original size after compression
 static double FLAGS_compression_ratio = 0.5;
@@ -185,6 +187,32 @@ class Stats {
  public:
   Stats() { Start(); }
 
+  Stats& operator=(const Stats& a){
+    done_ = a.done_;
+    bytes_ = a.bytes_;
+    start_ = a.start_;
+    finish_ = a.finish_;
+    return (*this);
+  }
+
+  Stats& operator-(const Stats& a){
+    done_ -= a.done_;
+    bytes_ -= a.bytes_;
+    start_ = a.start_;
+    return (*this);
+  }
+
+  bool operator==(const Stats& a){
+    if(done_ == a.done_ && bytes_ == a.bytes_){
+      return true;
+    }
+    return false;
+  }
+
+  void start_time(){
+    start_ = g_env->NowMicros();
+  }
+
   void Start() {
     next_report_ = 100;
     last_op_finish_ = start_;
@@ -244,8 +272,8 @@ class Stats {
         next_report_ += 50000;
       else
         next_report_ += 100000;
-      fprintf(stderr, "... finished %d ops%30s\r", done_, "");
-      fflush(stderr);
+      //fprintf(stderr, "... finished %d ops%30s\r", done_, "");
+      //fflush(stderr);
     }
   }
 
@@ -268,8 +296,8 @@ class Stats {
     }
     AppendWithSpace(&extra, message_);
 
-    fprintf(stdout, "%-12s : %11.3f micros/op;%s%s\n", name.ToString().c_str(),
-            seconds_ * 1e6 / done_, (extra.empty() ? "" : " "), extra.c_str());
+    fprintf(stdout, "%-12s : %11.3f iops;%s%s ", name.ToString().c_str(),
+             done_ / seconds_ , (extra.empty() ? "" : " "), extra.c_str());
     if (FLAGS_histogram) {
       fprintf(stdout, "Microseconds per op:\n%s\n", hist_.ToString().c_str());
     }
@@ -564,7 +592,7 @@ class Benchmark {
     }
 
     thread->stats.Start();
-    (arg->bm->*(arg->method))(thread);
+    (arg->bm->*(arg->method))(thread);//在这里跑的
     thread->stats.Stop();
 
     {
@@ -584,21 +612,28 @@ class Benchmark {
     for (int i = 0; i < n; i++) {
       arg[i].bm = this;
       arg[i].method = method;
-      arg[i].shared = &shared;
-      arg[i].thread = new ThreadState(i);
+      arg[i].shared = &shared;//锁
+      arg[i].thread = new ThreadState(i);//线程state
       arg[i].thread->shared = &shared;
-      g_env->StartThread(ThreadBody, &arg[i]);
+      if(i == 0){
+        g_env->StartThread(ThreadBody, &arg[i]);
+      }
+    }
+    if(name == Slice("fillrandom") && n == 2){
+      arg[1].thread = arg[0].thread;//线程state
+      arg[1].method = &Benchmark::SleepAndReport;
+      g_env->StartThread(ThreadBody, &arg[1]);
     }
 
     shared.mu.Lock();
-    while (shared.num_initialized < n) {
-      shared.cv.Wait();
+    while (shared.num_initialized < n) {//感叹一下 生产者消费者无处不在
+      shared.cv.Wait();//当num_initialized 小于1时 等待 创建完成
     }
 
     shared.start = true;
     shared.cv.SignalAll();
     while (shared.num_done < n) {
-      shared.cv.Wait();
+      shared.cv.Wait();//全部跑完
     }
     shared.mu.Unlock();
 
@@ -608,7 +643,7 @@ class Benchmark {
     arg[0].thread->stats.Report(name);
 
     for (int i = 0; i < n; i++) {
-      delete arg[i].thread;
+      if(i == 0) delete arg[i].thread;
     }
     delete[] arg;
   }
@@ -710,6 +745,28 @@ class Benchmark {
 
   void WriteRandom(ThreadState* thread) { DoWrite(thread, false); }
 
+  void SleepAndReport(ThreadState* thread) {
+    Stats pre;
+    Stats cur;
+    int count = 0;
+    while(true){
+      pre = thread->stats;
+      pre.start_time();//记录starttime
+      g_env->SleepForMicroseconds(10000000);
+      cur = thread->stats;
+      if(cur == pre){
+        count++;
+        if(count == 5){
+          break;
+        }
+      }
+      cur = cur - pre;//减去上一次记录的done 和 bytes 此时starttime变成了pre的
+      cur.Stop();//得到endtime
+      cur.Report(Slice("fillrandom"));//输出结果
+      PrintStats("leveldb.compact_status");
+    }
+  }
+
   void DoWrite(ThreadState* thread, bool seq) {
     if (num_ != FLAGS_num) {
       char msg[100];
@@ -728,8 +785,16 @@ class Benchmark {
         char key[100];
         snprintf(key, sizeof(key), "%016d", k);
         batch.Put(key, gen.Generate(value_size_));
-        bytes += value_size_ + strlen(key);
+        bytes = value_size_ + strlen(key);
         thread->stats.FinishedSingleOp();
+        thread->stats.AddBytes(bytes);
+        // if(bytes >= FLAGS_stat_size){
+        //   thread->stats.AddBytes(bytes);
+        //   thread->stats.Stop();
+        //   thread->stats.Report(Slice("fillrandom"));
+        //   thread->stats.Start();
+        //   bytes = 0;
+        // }
       }
       s = db_->Write(write_options_, &batch);
       if (!s.ok()) {
@@ -737,7 +802,7 @@ class Benchmark {
         exit(1);
       }
     }
-    thread->stats.AddBytes(bytes);
+    //thread->stats.AddBytes(bytes);
   }
 
   void ReadSequential(ThreadState* thread) {
@@ -770,17 +835,20 @@ class Benchmark {
     ReadOptions options;
     std::string value;
     int found = 0;
+    int64_t bytes = 0;
     for (int i = 0; i < reads_; i++) {
       char key[100];
       const int k = thread->rand.Next() % FLAGS_num;
       snprintf(key, sizeof(key), "%016d", k);
       if (db_->Get(options, key, &value).ok()) {
+        bytes += strlen(key) + value.size();
         found++;
       }
       thread->stats.FinishedSingleOp();
     }
     char msg[100];
     snprintf(msg, sizeof(msg), "(%d of %d found)", found, num_);
+    thread->stats.AddBytes(bytes);
     thread->stats.AddMessage(msg);
   }
 
@@ -889,7 +957,8 @@ class Benchmark {
     if (!db_->GetProperty(key, &stats)) {
       stats = "(failed)";
     }
-    fprintf(stdout, "\n%s\n", stats.c_str());
+    fprintf(stdout, "%s\n", stats.c_str());
+    fflush(stdout);
   }
 
   static void WriteToFile(void* arg, const char* buf, int n) {

@@ -646,7 +646,7 @@ void DBImpl::RecordBackgroundError(const Status& s) {
 }
 
 void DBImpl::MaybeScheduleCompaction() {
-  mutex_.AssertHeld();
+  mutex_.AssertHeld();//保证持有锁
   if (background_compaction_scheduled_) {
     // Already scheduled
   } else if (shutting_down_.load(std::memory_order_acquire)) {
@@ -657,31 +657,31 @@ void DBImpl::MaybeScheduleCompaction() {
              !versions_->NeedsCompaction()) {
     // No work to be done
   } else {
-    background_compaction_scheduled_ = true;
-    env_->Schedule(&DBImpl::BGWork, this);
-  }
+    background_compaction_scheduled_ = true;//设置当前后台有线程在跑
+    env_->Schedule(&DBImpl::BGWork, this);//添加到任务队列中  生产者
+  }//返回
 }
 
-void DBImpl::BGWork(void* db) {
+void DBImpl::BGWork(void* db) {//后台线程跑的函数（在任务队列中）
   reinterpret_cast<DBImpl*>(db)->BackgroundCall();
 }
 
-void DBImpl::BackgroundCall() {
-  MutexLock l(&mutex_);
+void DBImpl::BackgroundCall() {//实际跑的函数 消费
+  MutexLock l(&mutex_);//需要先上锁！！！！ 也就是说前面的生产者已经解锁了
   assert(background_compaction_scheduled_);
   if (shutting_down_.load(std::memory_order_acquire)) {
     // No more background work when shutting down.
   } else if (!bg_error_.ok()) {
     // No more background work after a background error.
   } else {
-    BackgroundCompaction();
+    BackgroundCompaction();//跑实际compact
   }
 
-  background_compaction_scheduled_ = false;
+  background_compaction_scheduled_ = false; //当前一次compact已经跑完了
 
   // Previous compaction may have produced too many files in a level,
   // so reschedule another compaction if needed.
-  MaybeScheduleCompaction();
+  MaybeScheduleCompaction();//再次进行compact 看看
   background_work_finished_signal_.SignalAll();
 }
 
@@ -892,9 +892,18 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   } else {
     compact->smallest_snapshot = snapshots_.oldest()->sequence_number();
   }
+  int64_t l1_bytes = 0;
+  for (int which = 0; which < 2; which++) {
+    for (int i = 0; i < compact->compaction->num_input_files(which); i++) {
+      l1_bytes += compact->compaction->input(which, i)->file_size;
+    }
+  }
+  stats_[compact->compaction->level() + 1].SetL1BytesRead(l1_bytes);
 
   // Release mutex while we're actually doing the compaction work
   mutex_.Unlock();
+  
+
 
   Iterator* input = versions_->MakeInputIterator(compact->compaction);
   input->SeekToFirst();
@@ -1023,6 +1032,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 
   mutex_.Lock();
   stats_[compact->compaction->level() + 1].Add(stats);
+
 
   if (status.ok()) {
     status = InstallCompactionResults(compact);
@@ -1308,7 +1318,7 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
 // REQUIRES: mutex_ is held
 // REQUIRES: this thread is currently at the front of the writer queue
 Status DBImpl::MakeRoomForWrite(bool force) {
-  mutex_.AssertHeld();
+  mutex_.AssertHeld();//已经拿了锁
   assert(!writers_.empty());
   bool allow_delay = !force;
   Status s;
@@ -1325,23 +1335,23 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       // individual write by 1ms to reduce latency variance.  Also,
       // this delay hands over some CPU to the compaction thread in
       // case it is sharing the same core as the writer.
-      mutex_.Unlock();
+      mutex_.Unlock();//解锁等待compact //这种情况下解锁进行compact
       env_->SleepForMicroseconds(1000);
       allow_delay = false;  // Do not delay a single write more than once
       mutex_.Lock();
     } else if (!force &&
                (mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
       // There is room in current memtable
-      break;
+      break;//这种情况下解锁进行compact
     } else if (imm_ != nullptr) {
       // We have filled up the current memtable, but the previous
       // one is still being compacted, so we wait.
       Log(options_.info_log, "Current memtable full; waiting...\n");
-      background_work_finished_signal_.Wait();
+      background_work_finished_signal_.Wait();//这种情况下解锁进行compact
     } else if (versions_->NumLevelFiles(0) >= config::kL0_StopWritesTrigger) {
       // There are too many level-0 files.
       Log(options_.info_log, "Too many L0 files; waiting...\n");
-      background_work_finished_signal_.Wait();
+      background_work_finished_signal_.Wait();//这种情况下解锁进行compact
     } else {
       // Attempt to switch to a new memtable and trigger compaction of old
       assert(versions_->PrevLogNumber() == 0);
@@ -1408,6 +1418,16 @@ bool DBImpl::GetProperty(const Slice& property, std::string* value) {
                  stats_[level].bytes_written / 1048576.0);
         value->append(buf);
       }
+    }
+    return true;
+  } else if (in == "compact_status"){
+    char buf[50];
+    int level = 1;
+    int files = versions_->NumLevelFiles(level);
+    if (stats_[level].micros > 0 || files > 0) {
+      snprintf(buf, sizeof(buf), "%8.0f; ",
+                 stats_[level].l1_bytes_read / 1048576.0);
+      value->append(buf);
     }
     return true;
   } else if (in == "sstables") {
