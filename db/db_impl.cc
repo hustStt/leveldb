@@ -899,6 +899,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     }
   }
   stats_[compact->compaction->level() + 1].SetL1BytesRead(l1_bytes);
+  stats_[compact->compaction->level() + 1]..AddCompNum();
 
   // Release mutex while we're actually doing the compaction work
   mutex_.Unlock();
@@ -1425,8 +1426,8 @@ bool DBImpl::GetProperty(const Slice& property, std::string* value) {
     int level = 1;
     int files = versions_->NumLevelFiles(level);
     if (stats_[level].micros > 0 || files > 0) {
-      snprintf(buf, sizeof(buf), "%8.0f; ",
-                 stats_[level].l1_bytes_read / 1048576.0);
+      snprintf(buf, sizeof(buf), "%8.0f;  %ld; ",
+                 stats_[level].l1_bytes_read / 1048576.0, stats_[level].compact_num);
       value->append(buf);
     }
     return true;

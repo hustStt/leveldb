@@ -87,7 +87,7 @@ class DBImpl : public DB {
   // Per level compaction stats.  stats_[level] stores the stats for
   // compactions that produced data for the specified "level".
   struct CompactionStats {
-    CompactionStats() : micros(0), bytes_read(0), bytes_written(0),l1_bytes_read(0) {}
+    CompactionStats() : micros(0), bytes_read(0), bytes_written(0),l1_bytes_read(0),compact_num(0) {}
 
     void Add(const CompactionStats& c) {
       this->micros += c.micros;
@@ -99,10 +99,15 @@ class DBImpl : public DB {
       this->l1_bytes_read = n;
     }
 
+    void AddCompNum(){
+        ++compact_num;
+    }
+
     int64_t micros;
     int64_t bytes_read;
     int64_t l1_bytes_read;
     int64_t bytes_written;
+    int64_t compact_num;
   };
 
   Iterator* NewInternalIterator(const ReadOptions&,
