@@ -899,7 +899,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     }
   }
   stats_[compact->compaction->level() + 1].SetL1BytesRead(l1_bytes);
-  stats_[compact->compaction->level() + 1]..AddCompNum();
+  stats_[compact->compaction->level() + 1].AddCompNum();
 
   // Release mutex while we're actually doing the compaction work
   mutex_.Unlock();
