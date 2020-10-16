@@ -681,7 +681,7 @@ void DBImpl::BackgroundCall() {//实际跑的函数 消费
 
   // Previous compaction may have produced too many files in a level,
   // so reschedule another compaction if needed.
-  MaybeScheduleCompaction();//再次进行compact 看看
+  MaybeScheduleCompaction();//再次调用 可能会加入到任务队列中
   background_work_finished_signal_.SignalAll();
 }
 
@@ -1343,16 +1343,16 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     } else if (!force &&
                (mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
       // There is room in current memtable
-      break;//这种情况下解锁进行compact
+      break;
     } else if (imm_ != nullptr) {
       // We have filled up the current memtable, but the previous
       // one is still being compacted, so we wait.
       Log(options_.info_log, "Current memtable full; waiting...\n");
-      background_work_finished_signal_.Wait();//这种情况下解锁进行compact
+      background_work_finished_signal_.Wait();//这种情况下解锁进行compact 保证imm被flush下去
     } else if (versions_->NumLevelFiles(0) >= config::kL0_StopWritesTrigger) {
       // There are too many level-0 files.
       Log(options_.info_log, "Too many L0 files; waiting...\n");
-      background_work_finished_signal_.Wait();//这种情况下解锁进行compact
+      background_work_finished_signal_.Wait();//这种情况下解锁进行compact 主要是解决compact问题
     } else {
       // Attempt to switch to a new memtable and trigger compaction of old
       assert(versions_->PrevLogNumber() == 0);
